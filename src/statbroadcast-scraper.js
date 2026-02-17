@@ -226,15 +226,16 @@ class StatBroadcastScraper {
     this.stats = { totalPolls: 0, errors: 0, lastPoll: null };
   }
 
-  // Full scan: check ALL verified GIDs for baseball activity
+  // Full scan: check all schools with verified GIDs for baseball activity
   async fullScan() {
-    console.log(`[SB] Starting full scan of ${TEAMS.length} schools...`);
+    const teamsWithGid = TEAMS.filter(t => t.gid);
+    console.log(`[SB] Starting full scan of ${teamsWithGid.length} verified schools...`);
     const startTime = Date.now();
     this.activeGids.clear();
     
     // Scan in batches of 10 to avoid overwhelming
-    for (let i = 0; i < TEAMS.length; i += 10) {
-      const batch = TEAMS.slice(i, i + 10);
+    for (let i = 0; i < teamsWithGid.length; i += 10) {
+      const batch = teamsWithGid.slice(i, i + 10);
       const results = await Promise.allSettled(
         batch.map(team => this.scrapeSchool(team.gid))
       );
