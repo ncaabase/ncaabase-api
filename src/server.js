@@ -1,28 +1,24 @@
-// NCAABase API Server
-// Data sources:
-//   1. StatBroadcast landing pages — live scores for 63 verified schools (10s poll)
-//   2. Sidearm aggregation API — complete game schedule for all schools (60s poll)
-//   3. Massey Ratings — static reference data (308 teams, indices, historical results)
+// NCAABase API Server v4
+// Sources:
+//   1. PEARatings API — today's D1 schedule (teams, times, win prob, GQI) — 5min poll
+//   2. StatBroadcast landing pages — LIVE scores only (63 schools) — 10s poll
+//   3. Massey Ratings — static reference (308 teams)
 
 const express = require('express');
 const cors = require('cors');
 const { StatBroadcastScraper } = require('./statbroadcast-scraper');
-const { SidearmPoller } = require('./sidearm-poller');
+const { PearPoller } = require('./pear-poller');
 const { GameStore } = require('./game-store');
 const { TEAMS } = require('./teams');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// CORS
 app.use(cors({
   origin: [
-    'https://ncaabase.com',
-    'https://www.ncaabase.com',
-    /\.ncaabase\.com$/,
-    /\.vercel\.app$/,
-    'http://localhost:3000',
-    'http://localhost:3001',
+    'https://ncaabase.com', 'https://www.ncaabase.com',
+    /\.ncaabase\.com$/, /\.vercel\.app$/,
+    'http://localhost:3000', 'http://localhost:3001',
   ],
   methods: ['GET'],
 }));
@@ -31,33 +27,27 @@ app.use(cors({
 
 const gameStore = new GameStore();
 const sbScraper = new StatBroadcastScraper();
-const sidearmPoller = new SidearmPoller();
+const pearPoller = new PearPoller();
 
-// Sync loop: merge data from both sources into the game store
+// Sync loop: merge PEAR schedule + SB live scores
 async function syncLoop() {
   while (true) {
     try {
-      // Merge Sidearm schedule into game store
-      const sidearmGames = sidearmPoller.getGames();
-      if (sidearmGames.length > 0) {
-        gameStore.updateFromSidearm(sidearmGames);
+      const pearGames = pearPoller.getGames();
+      if (pearGames.length > 0) {
+        gameStore.setSchedule(pearGames);
       }
-
-      // Merge StatBroadcast live scores into game store
       const sbGames = sbScraper.getGames();
-      if (sbGames.length > 0) {
-        gameStore.updateFromStatBroadcast(sbGames);
-      }
+      gameStore.setLive(sbGames);
     } catch (err) {
       console.error('[Sync] Error:', err.message);
     }
-    await new Promise(r => setTimeout(r, 5000)); // Sync every 5s
+    await new Promise(r => setTimeout(r, 5000));
   }
 }
 
 // ─── API Routes ───
 
-// Today's games (merged, sorted)
 app.get('/api/scores', (req, res) => {
   const games = gameStore.getGames();
   res.json({
@@ -68,24 +58,20 @@ app.get('/api/scores', (req, res) => {
   });
 });
 
-// Live games only
 app.get('/api/scores/live', (req, res) => {
   const games = gameStore.getLiveGames();
   res.json({ count: games.length, games });
 });
 
-// Games by conference
 app.get('/api/scores/conference/:conf', (req, res) => {
   const games = gameStore.getGamesByConf(req.params.conf);
   res.json({ conference: req.params.conf, count: games.length, games });
 });
 
-// All teams
 app.get('/api/teams', (req, res) => {
   res.json({ count: TEAMS.length, teams: TEAMS });
 });
 
-// Health / status
 app.get('/api/status', (req, res) => {
   res.json({
     status: 'ok',
@@ -93,19 +79,18 @@ app.get('/api/status', (req, res) => {
     teams: TEAMS.length,
     games: gameStore.getStats(),
     statbroadcast: sbScraper.getStats(),
-    sidearm: {
-      games: sidearmPoller.getGames().length,
-      lastFetch: sidearmPoller.lastFetch,
+    pear: {
+      games: pearPoller.getGames().length,
+      lastFetch: pearPoller.lastFetch,
     },
   });
 });
 
-// Root
 app.get('/', (req, res) => {
   res.json({
     name: 'NCAABase API',
-    version: '2.0',
-    sources: ['StatBroadcast (63 schools, 10s)', 'Sidearm (all schools, 60s)', 'Massey (308 teams, static)'],
+    version: '4.0',
+    sources: ['PEARatings (schedule, 5min)', 'StatBroadcast (live scores, 10s)'],
     endpoints: ['/api/scores', '/api/scores/live', '/api/scores/conference/:conf', '/api/teams', '/api/status'],
   });
 });
@@ -113,17 +98,16 @@ app.get('/', (req, res) => {
 // ─── Start ───
 
 app.listen(PORT, () => {
-  console.log(`\n=== NCAABase API v2.0 ===`);
+  console.log(`\n=== NCAABase API v4.0 ===`);
   console.log(`Port: ${PORT}`);
   console.log(`Teams: ${TEAMS.length}`);
-  console.log(`StatBroadcast: ${TEAMS.filter(t=>t.gid).length} schools (10s poll)`);
-  console.log(`Sidearm: all schools (60s poll)`);
+  console.log(`PEAR: schedule (5min poll)`);
+  console.log(`StatBroadcast: ${TEAMS.filter(t=>t.gid).length} schools (10s live poll)`);
   console.log(`========================\n`);
-
+  pearPoller.start();
   sbScraper.start();
-  sidearmPoller.start();
   syncLoop();
 });
 
-process.on('SIGTERM', () => { sbScraper.stop(); sidearmPoller.stop(); process.exit(0); });
-process.on('SIGINT', () => { sbScraper.stop(); sidearmPoller.stop(); process.exit(0); });
+process.on('SIGTERM', () => { sbScraper.stop(); pearPoller.stop(); process.exit(0); });
+process.on('SIGINT', () => { sbScraper.stop(); pearPoller.stop(); process.exit(0); });
