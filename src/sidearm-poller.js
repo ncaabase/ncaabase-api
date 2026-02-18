@@ -44,8 +44,14 @@ function parseGame(g) {
   const away = g.away_team || {};
 
   // Try to match to our 308-team database
-  const homeTeam = findTeam(home.name) || { name: home.name || 'TBD', abbr: '???', conf: home.conference?.name || '' };
-  const awayTeam = findTeam(away.name) || { name: away.name || 'TBD', abbr: '???', conf: away.conference?.name || '' };
+  const homeTeam = findTeam(home.name);
+  const awayTeam = findTeam(away.name);
+
+  // Only include games where at least one team is D1 (in our 308-team database)
+  if (!homeTeam && !awayTeam) return null;
+
+  const homeData = homeTeam || { name: home.name || 'TBD', abbr: '???', conf: home.conference?.name || '' };
+  const awayData = awayTeam || { name: away.name || 'TBD', abbr: '???', conf: away.conference?.name || '' };
 
   // Determine status
   let status = 'pre'; // default upcoming
@@ -58,16 +64,16 @@ function parseGame(g) {
     source: 'sidearm',
     status,
     home: {
-      name: homeTeam.name,
-      abbr: homeTeam.abbr,
-      conf: homeTeam.conf,
+      name: homeData.name,
+      abbr: homeData.abbr,
+      conf: homeData.conf,
       logo: home.logo || null,
       score: null, // Sidearm schedule doesn't include scores
     },
     away: {
-      name: awayTeam.name,
-      abbr: awayTeam.abbr,
-      conf: awayTeam.conf,
+      name: awayData.name,
+      abbr: awayData.abbr,
+      conf: awayData.conf,
       logo: away.logo || null,
       score: null,
     },
