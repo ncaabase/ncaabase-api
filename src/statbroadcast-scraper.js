@@ -50,49 +50,77 @@ function parseGames(html, hostGid) {
   const hostTeam = BY_GID[hostGid];
   if (!hostTeam) return games;
 
-  // Strategy: Parse the "This Week at a Glance" table which has the cleanest data
-  // Format: "Team1 Score1, Team2 Score2 - Status" or "Team1 Score1, Team2 Score2 - FINAL"
-  // Baseball rows are marked with "BASE" or "Baseball"
-  
-  // Extract all baseball entries from the week-at-a-glance table
-  // Pattern: "TeamA #, TeamB # - Status | BASE Baseball | LIVE/Stats link"
-  const baseballRegex = /([^|<]+?\d+,\s*[^|<]+?\d+)\s*-\s*([^|<]+?)\s*\|\s*BASE\s+Baseball/gi;
-  const pregameRegex = /([^|<]+?)\s+(?:vs\.\s*|at\s+)([^|<]+?)\s*\|\s*BASE\s+Baseball/gi;
-  
-  // Also try the cleaner format from the table
-  // Look for rows like: "Feb 13 | Kentucky 3, UNC Greensboro 0 - T3rd | BASE Baseball | LIVE"
-  const rowRegex = /(?:Feb|Mar|Apr|May|Jun)\s+\d+\s*\|?\s*(.+?)\s*\|\s*BASE\s+Baseball\s*\|\s*(LIVE|STATS|Book)/gi;
-  
-  let match;
+  // Strategy: Parse the table rows (tr class='search-item') from the week-at-a-glance table
+  // Each row structure:
+  //   <tr class=' search-item'>
+  //     <td class='pl-1'>Feb 18</td>
+  //     <td class='search'>TeamA Score, TeamB Score - STATUS</td>
+  //     <td class='search'><span>BASE</span><span>Baseball</span></td>
+  //     <td>LIVE button or Book link or archived link</td>
+  //   </tr>
+  //
+  // Status patterns:
+  //   FINAL:    "Kentucky 13, UNC Greensboro 2 - FINAL"
+  //   LIVE:     "Kentucky 3, Stanford 0 - T3rd" with nearby "LIVE" button and broadcast link
+  //   UPCOMING: "Kentucky at Evansville" (no score, "vs." or "at")
+  //
+  // Key insight: LIVE games have btn-live class and "LIVE" text nearby
+  // FINAL games have "archived.php" links nearby
+  // We parse each <tr> as a unit to get proper context
 
-  // Method 1: Parse structured event rows from table
-  // Look for patterns like "Kentucky 3, UNC Greensboro 0 - T3rd   -- In Progress"
-  const scorePattern = /([A-Za-z\s.&'()-]+?)\s+(\d+),\s*([A-Za-z\s.&'()-]+?)\s+(\d+)\s*-\s*([A-Za-z0-9\s]+?)(?:\s*--\s*(In Progress|In Progress|Final))?/g;
-  
-  while ((match = scorePattern.exec(html)) !== null) {
-    const [, team1Name, score1, team2Name, score2, statusText, progressFlag] = match;
+  // Split HTML into table rows
+  const rowRegex = /<tr[^>]*class=['"][^'"]*search-item[^'"]*['"][^>]*>([\s\S]*?)<\/tr>/gi;
+  let rowMatch;
+
+  while ((rowMatch = rowRegex.exec(html)) !== null) {
+    const row = rowMatch[1];
+
+    // Check if this row is baseball (contains BASE or Baseball)
+    if (!/>\s*BASE\s*<|>\s*Baseball\s*</i.test(row)) continue;
+
+    // Extract date
+    const dateMatch = row.match(/<td[^>]*>\s*((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug)\s+\d+)\s*<\/td>/i);
+    const dateStr = dateMatch ? dateMatch[1].trim() : '';
+
+    // Extract the event text (score or matchup)
+    const eventMatch = row.match(/<td[^>]*class=['"]search['"][^>]*>([^<]+)<\/td>/);
+    if (!eventMatch) continue;
+    const eventText = eventMatch[1].trim();
+
+    // Check if this is a live game (has btn-live class and "LIVE" text)
+    const isLive = /btn-live|class="[^"]*live[^"]*"/i.test(row) && />\s*LIVE\s*</i.test(row);
     
-    // Check if this is in a baseball context (look backwards for "BASE" or "Baseball")
-    const contextStart = Math.max(0, match.index - 200);
-    const context = html.slice(contextStart, match.index + match[0].length + 200);
-    if (!/BASE|Baseball/i.test(context)) continue;
+    // Check if this is a final/archived game
+    const isFinal = /archived\.php/i.test(row) || /FINAL/i.test(eventText);
+
+    // Check if this is an upcoming game (uses "vs." or "at" without scores)
+    const isUpcoming = /\s+(?:vs\.?|at)\s+/i.test(eventText) && !/\d+,/.test(eventText);
+
+    // Parse scores: "TeamA Score, TeamB Score - Status"
+    const scoreMatch = eventText.match(/^(.+?)\s+(\d+),\s*(.+?)\s+(\d+)(?:\s*-\s*(.+))?$/);
     
+    if (!scoreMatch && !isUpcoming) continue;
+
+    if (isUpcoming) {
+      // Skip upcoming games for now — Sidearm handles schedule
+      continue;
+    }
+
+    if (!scoreMatch) continue;
+
+    const [, team1Name, score1, team2Name, score2, statusText] = scoreMatch;
     const s1 = parseInt(score1);
     const s2 = parseInt(score2);
     const statusStr = (statusText || '').trim();
-    
-    let status = 'pre';
-    let inning = 0;
+
+    let status = 'final'; // Default to final for safety
+    let inning = 9;
     let half = 'top';
-    
-    if (/FINAL/i.test(statusStr)) {
-      status = 'final';
-      inning = 9; // default, could be different for extras
-      // Check for extra innings: "FINAL (10)" pattern
-      const extraMatch = statusStr.match(/FINAL\s*\((\d+)\)/i);
-      if (extraMatch) inning = parseInt(extraMatch[1]);
-    } else if (/In Progress/i.test(progressFlag || context)) {
+
+    if (isLive) {
       status = 'live';
+      inning = 1; // default
+      half = 'top';
       // Parse inning from status like "T3rd", "B5th", "Top 7th", "Bot 2nd"
       const innMatch = statusStr.match(/(?:T|Top)\s*(\d+)/i);
       const botMatch = statusStr.match(/(?:B|Bot|Bottom)\s*(\d+)/i);
@@ -100,37 +128,25 @@ function parseGames(html, hostGid) {
       const endMatch = statusStr.match(/(?:E|End)\s*(\d+)/i);
       if (innMatch) { inning = parseInt(innMatch[1]); half = 'top'; }
       else if (botMatch) { inning = parseInt(botMatch[1]); half = 'bottom'; }
-      else if (midMatch) { inning = parseInt(midMatch[1]); half = 'bottom'; }
-      else if (endMatch) { inning = parseInt(endMatch[1]); half = 'top'; }
-      else {
-        // Try plain number
-        const numMatch = statusStr.match(/(\d+)/);
-        if (numMatch) inning = parseInt(numMatch[1]);
-      }
-    } else if (statusStr && !/Pregame|PPD|Delayed/i.test(statusStr)) {
-      // Has a status that isn't pregame — probably live
-      status = 'live';
-      const innMatch = statusStr.match(/(?:T|Top)\s*(\d+)/i);
-      const botMatch = statusStr.match(/(?:B|Bot|Bottom)\s*(\d+)/i);
-      if (innMatch) { inning = parseInt(innMatch[1]); half = 'top'; }
-      else if (botMatch) { inning = parseInt(botMatch[1]); half = 'bottom'; }
+      else if (midMatch) { inning = parseInt(midMatch[1]); half = 'mid'; }
+      else if (endMatch) { inning = parseInt(endMatch[1]); half = 'end'; }
       else {
         const numMatch = statusStr.match(/(\d+)(?:st|nd|rd|th)/i);
         if (numMatch) inning = parseInt(numMatch[1]);
       }
+    } else if (isFinal) {
+      status = 'final';
+      inning = 9;
+      const extraMatch = statusStr.match(/\((\d+)\)/);
+      if (extraMatch) inning = parseInt(extraMatch[1]);
     }
-    
-    // Determine which team is home (host school is usually home)
+
+    // Determine home/away teams
     const t1 = findTeam(team1Name.trim());
     const t2 = findTeam(team2Name.trim());
-    
-    // The host school on their StatBroadcast page is listed first when they're the home team
-    // but "at" games show them second. Use the hostGid to determine.
+
     let homeTeam, awayTeam, homeScore, awayScore;
     if (t1 && t1.gid === hostGid) {
-      // Host is team1 — but are they home or away?
-      // On StatBroadcast landing pages, the format is typically "Visitor Score, Home Score"
-      // So team1 is the visitor (away team listed first)
       awayTeam = t1; awayScore = s1;
       homeTeam = t2 || { name: team2Name.trim(), abbr: team2Name.trim().substring(0,4).toUpperCase(), conf: null };
       homeScore = s2;
@@ -139,23 +155,30 @@ function parseGames(html, hostGid) {
       awayScore = s1;
       homeTeam = t2; homeScore = s2;
     } else {
-      // Neither matched as host — just use order as-is (first is visitor)
       awayTeam = t1 || { name: team1Name.trim(), abbr: team1Name.trim().substring(0,4).toUpperCase(), conf: null };
       awayScore = s1;
       homeTeam = t2 || { name: team2Name.trim(), abbr: team2Name.trim().substring(0,4).toUpperCase(), conf: null };
       homeScore = s2;
     }
-    
-    // Extract event ID from nearby Live Stats link
+
+    // Extract event ID from broadcast link
     let eventId = null;
-    const idMatch = context.match(/broadcast\/\?id=(\d+)/);
+    const idMatch = row.match(/broadcast\/\?id=(\d+)/);
     if (idMatch) eventId = idMatch[1];
-    
-    const gameId = eventId ? `sb-${eventId}` : `sb-${hostGid}-${awayTeam.abbr}-${homeTeam.abbr}`;
-    
+    // Also try archived link
+    if (!eventId) {
+      const archMatch = row.match(/archived\.php\?id=(\d+)/);
+      if (archMatch) eventId = archMatch[1];
+    }
+
+    const gameId = eventId ? `sb-${eventId}` : `sb-${hostGid}-${(awayTeam.abbr||'').replace(/\s/g,'')}-${(homeTeam.abbr||'').replace(/\s/g,'')}`;
+
     // Skip duplicates
     if (games.find(g => g.id === gameId)) continue;
-    
+
+    // Extract venue from row if available
+    let venue = '';
+
     games.push({
       id: gameId,
       eventId,
@@ -164,6 +187,7 @@ function parseGames(html, hostGid) {
       status,
       inning,
       half,
+      date: dateStr,
       outs: 0,
       balls: 0,
       strikes: 0,
@@ -193,23 +217,12 @@ function parseGames(html, hostGid) {
       runners: { first: false, second: false, third: false },
       pitcher: null,
       hitter: null,
-      winProb: { away: 50, home: 50 },
-      venue: '',
+      venue,
       startTime: '',
       updatedAt: new Date().toISOString(),
     });
   }
 
-  // Method 2: Parse the "Today's Events" section for live games with more detail
-  // This section has structured divs with team logos, scores, and live/pregame status
-  // Pattern in HTML: team logo images with alt text, scores in text nodes
-  // Look for the broadcast event ID pattern
-  const liveEventPattern = /broadcast\/\?id=(\d+)/g;
-  const eventIds = new Set();
-  while ((match = liveEventPattern.exec(html)) !== null) {
-    eventIds.add(match[1]);
-  }
-  
   return games;
 }
 
