@@ -133,6 +133,23 @@ class PearPoller {
     }
   }
 
+  async fetchByDate(dateStr) {
+    // dateStr like "2026-02-15"
+    const season = new Date().getFullYear();
+    const url = `https://pearatings.com/api/cbase/schedule/today?season=${season}&date=${dateStr}`;
+    try {
+      const raw = await fetch(url);
+      const json = JSON.parse(raw);
+      const allGames = json.games || [];
+      const games = allGames.map(parseGame).filter(Boolean);
+      console.log(`[PEAR] ${games.length} games for ${dateStr}`);
+      return games;
+    } catch (err) {
+      console.log(`[PEAR] Fetch by date failed: ${err.message}`);
+      return [];
+    }
+  }
+
   getGames() { return this.games; }
 
   start() {

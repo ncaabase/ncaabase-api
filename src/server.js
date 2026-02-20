@@ -58,6 +58,22 @@ app.get('/api/scores', (req, res) => {
   });
 });
 
+app.get('/api/scores/:date', async (req, res) => {
+  const dateStr = req.params.date; // "2026-02-15"
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+    return res.status(400).json({ error: 'Invalid date format. Use YYYY-MM-DD' });
+  }
+  // Check if it's today — return live-merged data
+  const today = new Date().toISOString().slice(0, 10);
+  if (dateStr === today) {
+    const games = gameStore.getGames();
+    return res.json({ date: today, count: games.length, games });
+  }
+  // Otherwise fetch from PEAR for that date
+  const games = await pearPoller.fetchByDate(dateStr);
+  res.json({ date: dateStr, count: games.length, games });
+});
+
 app.get('/api/scores/live', (req, res) => {
   const games = gameStore.getLiveGames();
   res.json({ count: games.length, games });
