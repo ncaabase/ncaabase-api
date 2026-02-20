@@ -16,7 +16,14 @@ function fetchGet(url, timeout = 10000) {
     const mod = url.startsWith('https') ? https : http;
     const req = mod.get(url, {
       timeout,
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'identity',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+      }
     }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
         return fetchGet(res.headers.location, timeout).then(resolve).catch(reject);
@@ -362,7 +369,19 @@ class StatBroadcastScraper {
       } else {
         // Log what we got back for debugging
         if (this.stats.totalScans < 2) {
-          console.log(`[StatBroadcast] Token fail for ${gid}: got ${html.length} chars, has sbCal: ${html.includes('sbCal')}, first 200: ${html.substring(0, 200).replace(/\n/g, ' ')}`);
+          // Search for the script block that should contain sbCal
+          const scriptIdx = html.indexOf('<script');
+          const sbCalIdx = html.indexOf('sbCal');
+          const hashIdx = html.indexOf('.hash');
+          const calendarIdx = html.indexOf('eventCalendar');
+          console.log(`[StatBroadcast] Token fail for ${gid}: ${html.length} chars, sbCal@${sbCalIdx}, hash@${hashIdx}, calendar@${calendarIdx}, scripts@${scriptIdx}`);
+          // Try to find any inline script content
+          const inlineScripts = html.match(/<script[^>]*>[\s\S]*?<\/script>/gi) || [];
+          const withContent = inlineScripts.filter(s => s.length > 100);
+          console.log(`[StatBroadcast]   ${inlineScripts.length} script tags, ${withContent.length} with content`);
+          if (withContent.length > 0) {
+            console.log(`[StatBroadcast]   Largest script: ${withContent.sort((a,b) => b.length - a.length)[0].substring(0, 300)}`);
+          }
         }
       }
     } catch (e) {
@@ -445,8 +464,8 @@ class StatBroadcastScraper {
     const start = Date.now();
     this.games.clear();
 
-    for (let i = 0; i < SB_SCHOOLS.length; i += 5) {
-      const batch = SB_SCHOOLS.slice(i, i + 5);
+    for (let i = 0; i < SB_SCHOOLS.length; i += 2) {
+      const batch = SB_SCHOOLS.slice(i, i + 2);
       await Promise.allSettled(
         batch.map(async (school) => {
           try {
@@ -467,7 +486,7 @@ class StatBroadcastScraper {
           } catch (e) { /* skip school */ }
         })
       );
-      await new Promise(r => setTimeout(r, 500));
+      await new Promise(r => setTimeout(r, 2000));
     }
 
     this.stats.totalScans++;
