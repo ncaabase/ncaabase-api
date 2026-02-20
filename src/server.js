@@ -175,7 +175,7 @@ app.listen(PORT, () => {
   console.log(`========================\n`);
   pearPoller.start();
   sidearmLive.start();
-  statBroadcast.start();
+  // statBroadcast.start(); // Disabled — StatBroadcast blocks server-side scraping
   syncLoop();
 });
 
