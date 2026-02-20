@@ -359,8 +359,17 @@ class StatBroadcastScraper {
         this.tokenCache.set(gid, tokens);
         this.stats.tokensObtained++;
         return { hash: tokens.hash, time: tokens.time };
+      } else {
+        // Log what we got back for debugging
+        if (this.stats.totalScans < 2) {
+          console.log(`[StatBroadcast] Token fail for ${gid}: got ${html.length} chars, has sbCal: ${html.includes('sbCal')}, first 200: ${html.substring(0, 200).replace(/\n/g, ' ')}`);
+        }
       }
-    } catch (e) { /* failed */ }
+    } catch (e) {
+      if (this.stats.totalScans < 2) {
+        console.log(`[StatBroadcast] Token error for ${gid}: ${e.message}`);
+      }
+    }
     return null;
   }
 
