@@ -36,30 +36,37 @@ function parseGame(g) {
     status = 'pre';
   } else {
     // Completed game. Format: "WinnerName Score-Score" e.g. "Kansas St. 24-5"
-    // The winner name matches either home or away team
     const scoreMatch = g.score.match(/(\d+)-(\d+)\s*$/);
     if (scoreMatch) {
       const highScore = parseInt(scoreMatch[1]);
       const lowScore = parseInt(scoreMatch[2]);
-      status = 'final';
 
-      // Figure out which team won by checking if winner name is in the score string
-      const scoreName = g.score.replace(/\s*\d+-\d+\s*$/, '').trim().toLowerCase();
-      const homeName = (g.home_team || '').toLowerCase();
-      const awayName = (g.away_team || '').toLowerCase();
-
-      if (scoreName.includes(homeName) || homeName.includes(scoreName)) {
-        // Home team won
-        homeScore = highScore;
-        awayScore = lowScore;
-      } else if (scoreName.includes(awayName) || awayName.includes(scoreName)) {
-        // Away team won
-        awayScore = highScore;
-        homeScore = lowScore;
+      // 0-0 with null Time likely means cancelled/postponed — skip this game
+      if (highScore === 0 && lowScore === 0) {
+        status = 'cancelled';
+        homeScore = 0;
+        awayScore = 0;
       } else {
-        // Can't determine — assign high to home as default
-        homeScore = highScore;
-        awayScore = lowScore;
+        status = 'final';
+
+        // Figure out which team won by checking if winner name is in the score string
+        const scoreName = g.score.replace(/\s*\d+-\d+\s*$/, '').trim().toLowerCase();
+        const homeName = (g.home_team || '').toLowerCase();
+        const awayName = (g.away_team || '').toLowerCase();
+
+        if (scoreName.includes(homeName) || homeName.includes(scoreName)) {
+          // Home team won
+          homeScore = highScore;
+          awayScore = lowScore;
+        } else if (scoreName.includes(awayName) || awayName.includes(scoreName)) {
+          // Away team won
+          awayScore = highScore;
+          homeScore = lowScore;
+        } else {
+          // Can't determine — assign high to home as default
+          homeScore = highScore;
+          awayScore = lowScore;
+        }
       }
     }
   }
@@ -120,14 +127,17 @@ class PearPoller {
 
   async fetchGames() {
     const season = new Date().getFullYear();
+    const today = new Date().toISOString().slice(0, 10);
     const url = `https://pearatings.com/api/cbase/schedule/today?season=${season}`;
     try {
       const raw = await fetch(url);
       const json = JSON.parse(raw);
       const allGames = json.games || [];
-      this.games = allGames.map(parseGame).filter(Boolean);
+      // Filter to only today's games by Date field
+      const todayGames = allGames.filter(g => g.Date === today);
+      this.games = todayGames.map(parseGame).filter(Boolean);
       this.lastFetch = Date.now();
-      console.log(`[PEAR] ${this.games.length} D1 baseball games today (${json.date || 'unknown date'})`);
+      console.log(`[PEAR] ${this.games.length} D1 baseball games for ${today} (${allGames.length} total in API response)`);
     } catch (err) {
       console.log(`[PEAR] Fetch failed: ${err.message}`);
     }
@@ -141,8 +151,10 @@ class PearPoller {
       const raw = await fetch(url);
       const json = JSON.parse(raw);
       const allGames = json.games || [];
-      const games = allGames.map(parseGame).filter(Boolean);
-      console.log(`[PEAR] ${games.length} games for ${dateStr}`);
+      // Filter to only games matching the requested date
+      const dated = allGames.filter(g => g.Date === dateStr);
+      const games = dated.map(parseGame).filter(Boolean);
+      console.log(`[PEAR] ${games.length} games for ${dateStr} (${allGames.length} total in API response)`);
       return games;
     } catch (err) {
       console.log(`[PEAR] Fetch by date failed: ${err.message}`);
