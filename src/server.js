@@ -92,6 +92,25 @@ app.get('/api/teams', (req, res) => {
   res.json({ count: TEAMS.length, teams: TEAMS });
 });
 
+// Team schedule — full season games for a team
+app.get('/api/team/:name/schedule', async (req, res) => {
+  const teamName = decodeURIComponent(req.params.name);
+  try {
+    const games = await pearPoller.fetchTeamSchedule(teamName);
+    const team = TEAMS.find(t =>
+      t.name.toLowerCase() === teamName.toLowerCase() ||
+      t.abbr.toLowerCase() === teamName.toLowerCase()
+    );
+    res.json({
+      team: team || { name: teamName },
+      count: games.length,
+      games,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/status', (req, res) => {
   res.json({
     status: 'ok',

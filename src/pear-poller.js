@@ -163,6 +163,49 @@ class PearPoller {
     }
   }
 
+  // Fetch entire season schedule for a team
+  async fetchTeamSchedule(teamName) {
+    const season = new Date().getFullYear();
+    // PEAR doesn't have a per-team endpoint, so we fetch the full season
+    // We'll scan Feb through June by fetching each date range
+    const allGames = [];
+    const seen = new Set();
+
+    // Fetch a wide date range — PEAR returns games near the date param
+    const dates = [];
+    for (let m = 2; m <= 6; m++) {
+      dates.push(`${season}-${String(m).padStart(2,'0')}-01`);
+      dates.push(`${season}-${String(m).padStart(2,'0')}-15`);
+    }
+
+    for (const dateStr of dates) {
+      try {
+        const url = `https://pearatings.com/api/cbase/schedule/today?season=${season}&date=${dateStr}`;
+        const raw = await fetch(url);
+        const json = JSON.parse(raw);
+        const games = json.games || [];
+        const teamLower = teamName.toLowerCase();
+        for (const g of games) {
+          const h = (g.home_team || '').toLowerCase();
+          const a = (g.away_team || '').toLowerCase();
+          if (h.includes(teamLower) || teamLower.includes(h) || a.includes(teamLower) || teamLower.includes(a)) {
+            const key = `${g.Date}-${g.home_team}-${g.away_team}`;
+            if (!seen.has(key)) {
+              seen.add(key);
+              const parsed = parseGame(g);
+              if (parsed) allGames.push(parsed);
+            }
+          }
+        }
+      } catch (e) { /* skip date */ }
+    }
+
+    // Sort by date
+    allGames.sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+    console.log(`[PEAR] Team schedule for "${teamName}": ${allGames.length} games`);
+    return allGames;
+  }
+
   getGames() { return this.games; }
 
   start() {
