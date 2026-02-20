@@ -1,27 +1,27 @@
-// StatBroadcast Landing Page Scraper — LIVE GAMES ONLY
-// Scrapes server-rendered HTML from statbroadcast.com/events/statbroadcast.php?gid={gid}
-// ONLY outputs games that have the "LIVE" button (currently in progress)
-// Does NOT output finals or upcoming — PEARatings handles the schedule
+// StatBroadcast Live Score Scraper v2
+// Scrapes score text from StatBroadcast calendar API for 212 D1 schools
+// Returns: team names, scores, inning, game status (no BSO/runners)
+//
+// Flow:
+// 1. Fetch statmonitr.php?gid={gid} to get hash + time tokens
+// 2. POST to _calendar.php with baseball filter to get today's games
+// 3. Parse score text: "Alabama 3, Rhode Island 0 - Pregame" / "T5th" / "FINAL"
 
 const https = require('https');
 const http = require('http');
-const { TEAMS, BY_GID, findTeam } = require('./teams');
+const querystring = require('querystring');
 
-// ─── HTTP Fetcher ───
-
-function fetch(url, timeout = 6000) {
+function fetchGet(url, timeout = 10000) {
   return new Promise((resolve, reject) => {
     const mod = url.startsWith('https') ? https : http;
     const req = mod.get(url, {
       timeout,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Accept': 'text/html',
-      }
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
     }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        return fetch(res.headers.location, timeout).then(resolve).catch(reject);
+        return fetchGet(res.headers.location, timeout).then(resolve).catch(reject);
       }
+      if (res.statusCode !== 200) return reject(new Error(`HTTP ${res.statusCode}`));
       let data = '';
       res.on('data', chunk => data += chunk);
       res.on('end', () => resolve(data));
@@ -31,249 +31,475 @@ function fetch(url, timeout = 6000) {
   });
 }
 
-// ─── HTML Parser ───
-// Only parses LIVE baseball games from StatBroadcast landing pages
-// 
-// HTML structure per row:
-//   <tr class=' search-item'>
-//     <td class='pl-1'>Feb 18</td>
-//     <td class='search'>TeamA Score, TeamB Score - T3rd</td>
-//     <td class='search'><span>BASE</span><span>Baseball</span></td>
-//     <td><a class="btn btn-live btn-sm ... live" href="...broadcast/?id=XXXXX">LIVE</a></td>
-//   </tr>
-//
-// Key: LIVE games have "btn-live" class AND "LIVE" text in the last column
-// FINAL games have "archived.php" links — we SKIP these
-// Upcoming games have "vs." or "at" without scores — we SKIP these
-
-function parseGames(html, hostGid) {
-  const games = [];
-  const hostTeam = BY_GID[hostGid];
-  if (!hostTeam) return games;
-
-  // Split HTML into table rows
-  const rowRegex = /<tr[^>]*class=['"][^'"]*search-item[^'"]*['"][^>]*>([\s\S]*?)<\/tr>/gi;
-  let rowMatch;
-
-  while ((rowMatch = rowRegex.exec(html)) !== null) {
-    const row = rowMatch[1];
-
-    // MUST be baseball
-    if (!/>\s*BASE\s*<|>\s*Baseball\s*</i.test(row)) continue;
-
-    // MUST have LIVE button — this is the key filter
-    const isLive = /btn-live/i.test(row) && />\s*LIVE\s*</i.test(row);
-    if (!isLive) continue;
-
-    // Extract the score text: "TeamA Score, TeamB Score - Status"
-    const eventMatch = row.match(/<td[^>]*class=['"]search['"][^>]*>([^<]+)<\/td>/);
-    if (!eventMatch) continue;
-    const eventText = eventMatch[1].trim();
-
-    // Parse scores: "TeamA 3, TeamB 1 - T5th"
-    const scoreMatch = eventText.match(/^(.+?)\s+(\d+),\s*(.+?)\s+(\d+)(?:\s*-\s*(.+))?$/);
-    if (!scoreMatch) continue;
-
-    const [, team1Name, score1, team2Name, score2, statusText] = scoreMatch;
-    const s1 = parseInt(score1);
-    const s2 = parseInt(score2);
-    const statusStr = (statusText || '').trim();
-
-    // Parse inning from status like "T3rd", "B5th", "Top 7th", "Bot 2nd"
-    let inning = 1;
-    let half = 'top';
-    const topMatch = statusStr.match(/(?:T|Top)\s*(\d+)/i);
-    const botMatch = statusStr.match(/(?:B|Bot|Bottom)\s*(\d+)/i);
-    const midMatch = statusStr.match(/(?:M|Mid|Middle)\s*(\d+)/i);
-    const endMatch = statusStr.match(/(?:E|End)\s*(\d+)/i);
-    if (topMatch) { inning = parseInt(topMatch[1]); half = 'top'; }
-    else if (botMatch) { inning = parseInt(botMatch[1]); half = 'bottom'; }
-    else if (midMatch) { inning = parseInt(midMatch[1]); half = 'mid'; }
-    else if (endMatch) { inning = parseInt(endMatch[1]); half = 'end'; }
-    else {
-      const numMatch = statusStr.match(/(\d+)(?:st|nd|rd|th)/i);
-      if (numMatch) inning = parseInt(numMatch[1]);
-    }
-
-    // Determine home/away teams
-    const t1 = findTeam(team1Name.trim());
-    const t2 = findTeam(team2Name.trim());
-
-    let homeTeam, awayTeam, homeScore, awayScore;
-    if (t1 && t1.gid === hostGid) {
-      awayTeam = t1; awayScore = s1;
-      homeTeam = t2 || { name: team2Name.trim(), abbr: team2Name.trim().substring(0,4).toUpperCase(), conf: '' };
-      homeScore = s2;
-    } else if (t2 && t2.gid === hostGid) {
-      awayTeam = t1 || { name: team1Name.trim(), abbr: team1Name.trim().substring(0,4).toUpperCase(), conf: '' };
-      awayScore = s1;
-      homeTeam = t2; homeScore = s2;
-    } else {
-      awayTeam = t1 || { name: team1Name.trim(), abbr: team1Name.trim().substring(0,4).toUpperCase(), conf: '' };
-      awayScore = s1;
-      homeTeam = t2 || { name: team2Name.trim(), abbr: team2Name.trim().substring(0,4).toUpperCase(), conf: '' };
-      homeScore = s2;
-    }
-
-    // Extract broadcast event ID
-    let eventId = null;
-    const idMatch = row.match(/broadcast\/\?id=(\d+)/);
-    if (idMatch) eventId = idMatch[1];
-
-    const gameId = eventId ? `sb-${eventId}` : `sb-${hostGid}-${(awayTeam.abbr||'').replace(/\s/g,'')}-${(homeTeam.abbr||'').replace(/\s/g,'')}`;
-
-    // Skip duplicates
-    if (games.find(g => g.id === gameId)) continue;
-
-    games.push({
-      id: gameId,
-      eventId,
-      source: 'statbroadcast',
-      sourceGid: hostGid,
-      status: 'live',
-      inning,
-      half,
-      away: {
-        name: awayTeam.name,
-        abbr: awayTeam.abbr,
-        rank: null,
-        record: '',
-        conf: awayTeam.conf || '',
-        score: awayScore,
-        hits: null,
-        errors: null,
-        lineScore: [],
-      },
-      home: {
-        name: homeTeam.name,
-        abbr: homeTeam.abbr,
-        rank: null,
-        record: '',
-        conf: homeTeam.conf || '',
-        score: homeScore,
-        hits: null,
-        errors: null,
-        lineScore: [],
-      },
-      runners: { first: false, second: false, third: false },
-      venue: '',
-      startTime: '',
-      updatedAt: new Date().toISOString(),
+function fetchPost(url, postData, timeout = 10000) {
+  return new Promise((resolve, reject) => {
+    const body = querystring.stringify(postData);
+    const parsed = new URL(url);
+    const options = {
+      hostname: parsed.hostname,
+      port: parsed.port || 443,
+      path: parsed.pathname + parsed.search,
+      method: 'POST',
+      timeout,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Content-Length': Buffer.byteLength(body),
+      }
+    };
+    const mod = url.startsWith('https') ? https : http;
+    const req = mod.request(options, (res) => {
+      if (res.statusCode !== 200) return reject(new Error(`HTTP ${res.statusCode}`));
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => resolve(data));
     });
-  }
-
-  return games;
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
+    req.write(body);
+    req.end();
+  });
 }
 
-// ─── Scraper Controller ───
+// ─── 212 StatBroadcast Schools ───
+const SB_SCHOOLS = [
+  {name:'Abilene Christian',gid:'achr'},
+  {name:'Air Force',gid:'afa'},
+  {name:'Alabama',gid:'alab'},
+  {name:'Alabama State',gid:'alst'},
+  {name:'Appalachian State',gid:'appa'},
+  {name:'Arizona',gid:'ariz'},
+  {name:'Arizona State',gid:'asu'},
+  {name:'Arkansas',gid:'ark'},
+  {name:'Arkansas State',gid:'aru'},
+  {name:'Auburn',gid:'aub'},
+  {name:'Austin Peay',gid:'ausp'},
+  {name:'Ball State',gid:'ball'},
+  {name:'Baylor',gid:'bay'},
+  {name:'Belmont',gid:'belm'},
+  {name:'Boston College',gid:'bc'},
+  {name:'Bradley',gid:'brad'},
+  {name:'Butler',gid:'butl'},
+  {name:'BYU',gid:'byu'},
+  {name:'Cal Poly',gid:'cslo'},
+  {name:'Cal State Bakersfield',gid:'ucsb'},
+  {name:'California',gid:'cal'},
+  {name:'California Baptist',gid:'calb'},
+  {name:'Campbell',gid:'camb'},
+  {name:'Charleston',gid:'chac'},
+  {name:'Charlotte',gid:'ncch'},
+  {name:'Cincinnati',gid:'cinn'},
+  {name:'Clemson',gid:'clem'},
+  {name:'Coastal Carolina',gid:'coas'},
+  {name:'Columbia',gid:'colm'},
+  {name:'Connecticut',gid:'conn'},
+  {name:'Creighton',gid:'crei'},
+  {name:'Dallas Baptist',gid:'dbap'},
+  {name:'Dayton',gid:'dayt'},
+  {name:'Delaware',gid:'dela'},
+  {name:'Duke',gid:'duke'},
+  {name:'East Carolina',gid:'ecu'},
+  {name:'East Tennessee State',gid:'etsu'},
+  {name:'Eastern Kentucky',gid:'eky'},
+  {name:'Eastern Michigan',gid:'emu'},
+  {name:'Elon',gid:'elon'},
+  {name:'Evansville',gid:'evan'},
+  {name:'Fairfield',gid:'fair'},
+  {name:'FAU',gid:'fau'},
+  {name:'FGCU',gid:'fguu'},
+  {name:'FIU',gid:'flin'},
+  {name:'Florida',gid:'fla'},
+  {name:'Florida State',gid:'fsu'},
+  {name:'Fresno State',gid:'fres'},
+  {name:'Gardner-Webb',gid:'gard'},
+  {name:'George Mason',gid:'gema'},
+  {name:'Georgetown',gid:'gu'},
+  {name:'Georgia',gid:'geo'},
+  {name:'Georgia Southern',gid:'geos'},
+  {name:'Georgia State',gid:'gest'},
+  {name:'Georgia Tech',gid:'geot'},
+  {name:'Gonzaga',gid:'gonz'},
+  {name:'Grand Canyon',gid:'gcan'},
+  {name:'Hawaii',gid:'haw'},
+  {name:'Hofstra',gid:'hofs'},
+  {name:'Houston',gid:'hou'},
+  {name:'Houston Christian',gid:'houb'},
+  {name:'Illinois',gid:'ill'},
+  {name:'Illinois State',gid:'ilsu'},
+  {name:'Incarnate Word',gid:'inca'},
+  {name:'Indiana',gid:'ind'},
+  {name:'Indiana State',gid:'insu'},
+  {name:'Iowa',gid:'iowa'},
+  {name:'Jackson State',gid:'jast'},
+  {name:'Jacksonville State',gid:'jkst'},
+  {name:'James Madison',gid:'jame'},
+  {name:'Kansas',gid:'kan'},
+  {name:'Kansas State',gid:'ksu'},
+  {name:'Kennesaw State',gid:'kenn'},
+  {name:'Kentucky',gid:'kty'},
+  {name:'Lamar',gid:'lama'},
+  {name:'Liberty',gid:'libe'},
+  {name:'Lipscomb',gid:'lips'},
+  {name:'Little Rock',gid:'arkl'},
+  {name:'Long Beach State',gid:'lbst'},
+  {name:'Louisiana',gid:'ulaf'},
+  {name:'Louisiana Tech',gid:'latc'},
+  {name:'Louisville',gid:'lou'},
+  {name:'LSU',gid:'lsu'},
+  {name:'Marist',gid:'mari'},
+  {name:'Marshall',gid:'mars'},
+  {name:'Maryland',gid:'md'},
+  {name:'McNeese',gid:'mcne'},
+  {name:'Memphis',gid:'mem'},
+  {name:'Mercer',gid:'merc'},
+  {name:'Miami (FL)',gid:'mifl'},
+  {name:'Michigan',gid:'mich'},
+  {name:'Michigan State',gid:'msu'},
+  {name:'Middle Tennessee',gid:'mtn'},
+  {name:'Milwaukee',gid:'wiml'},
+  {name:'Minnesota',gid:'minn'},
+  {name:'Mississippi State',gid:'msst'},
+  {name:'Missouri',gid:'miss'},
+  {name:'Missouri State',gid:'mosu'},
+  {name:'Monmouth',gid:'monm'},
+  {name:'Morehead State',gid:'more'},
+  {name:'Murray State',gid:'must'},
+  {name:'Navy',gid:'navy'},
+  {name:'Nebraska',gid:'neb'},
+  {name:'Nevada',gid:'unv'},
+  {name:'New Mexico',gid:'nm'},
+  {name:'New Mexico State',gid:'nmst'},
+  {name:'New Orleans',gid:'newo'},
+  {name:'Nicholls',gid:'nist'},
+  {name:'North Alabama',gid:'noal'},
+  {name:'North Carolina',gid:'unc'},
+  {name:'North Carolina A&T',gid:'ncat'},
+  {name:'North Carolina State',gid:'ncst'},
+  {name:'North Dakota State',gid:'ndsu'},
+  {name:'North Florida',gid:'nfla'},
+  {name:'Northeastern',gid:'ne'},
+  {name:'Northwestern',gid:'nw'},
+  {name:'Northwestern State',gid:'nwst'},
+  {name:'Notre Dame',gid:'nd'},
+  {name:'Oakland',gid:'oakl'},
+  {name:'Ohio',gid:'ohio'},
+  {name:'Ohio State',gid:'osu'},
+  {name:'Oklahoma',gid:'okla'},
+  {name:'Oklahoma State',gid:'okst'},
+  {name:'Old Dominion',gid:'oldd'},
+  {name:'Ole Miss',gid:'ole'},
+  {name:'Oregon',gid:'ore'},
+  {name:'Oregon State',gid:'orst'},
+  {name:'Penn',gid:'penn'},
+  {name:'Penn State',gid:'psu'},
+  {name:'Pepperdine',gid:'pepp'},
+  {name:'Pittsburgh',gid:'pitt'},
+  {name:'Portland',gid:'port'},
+  {name:'Prairie View A&M',gid:'pvam'},
+  {name:'Presbyterian College',gid:'psby'},
+  {name:'Purdue',gid:'pur'},
+  {name:'Queens',gid:'qunc'},
+  {name:'Rhode Island',gid:'uri'},
+  {name:'Rice',gid:'rice'},
+  {name:'Richmond',gid:'rich'},
+  {name:'Rutgers',gid:'rutu'},
+  {name:'Sacramento State',gid:'cssa'},
+  {name:'Saint John\'s',gid:'stjo'},
+  {name:'Saint Louis',gid:'stlo'},
+  {name:'Saint Mary\'s College',gid:'stma'},
+  {name:'Sam Houston State',gid:'samh'},
+  {name:'Samford',gid:'samf'},
+  {name:'San Diego',gid:'usd'},
+  {name:'San Diego State',gid:'sdsu'},
+  {name:'San Francisco',gid:'sanf'},
+  {name:'San Jose State',gid:'sjsu'},
+  {name:'Santa Clara',gid:'sacl'},
+  {name:'Seattle University',gid:'sea'},
+  {name:'Seton Hall',gid:'seha'},
+  {name:'SIUE',gid:'siue'},
+  {name:'South Alabama',gid:'sala'},
+  {name:'South Carolina',gid:'scar'},
+  {name:'South Dakota State',gid:'sdst'},
+  {name:'South Florida',gid:'sfla'},
+  {name:'Southeastern Louisiana',gid:'sela'},
+  {name:'Southern Illinois',gid:'silu'},
+  {name:'Southern Miss',gid:'smis'},
+  {name:'Stanford',gid:'stan'},
+  {name:'Stephen F. Austin',gid:'sasu'},
+  {name:'Stetson',gid:'stet'},
+  {name:'Stony Brook',gid:'ston'},
+  {name:'Tarleton State',gid:'tarl'},
+  {name:'TCU',gid:'tcu'},
+  {name:'Tennessee',gid:'tenn'},
+  {name:'Tennessee Tech',gid:'tntc'},
+  {name:'Texas',gid:'tex'},
+  {name:'Texas A&M',gid:'tam'},
+  {name:'Texas A&M-Corpus Christi',gid:'tamcc'},
+  {name:'Texas State',gid:'txst'},
+  {name:'Texas Tech',gid:'text'},
+  {name:'Towson',gid:'tows'},
+  {name:'Troy',gid:'troy'},
+  {name:'Tulane',gid:'tul'},
+  {name:'UAB',gid:'albr'},
+  {name:'UC Davis',gid:'ucda'},
+  {name:'UC San Diego',gid:'ucsd'},
+  {name:'UC Santa Barbara',gid:'ucsb'},
+  {name:'UCF',gid:'ucf'},
+  {name:'UCLA',gid:'ucla'},
+  {name:'UIC',gid:'ilch'},
+  {name:'ULM',gid:'ulm'},
+  {name:'UMass',gid:'mass'},
+  {name:'UNCG',gid:'uncg'},
+  {name:'UNCW',gid:'ncwi'},
+  {name:'UNLV',gid:'unlv'},
+  {name:'USC',gid:'usc'},
+  {name:'UTA',gid:'txar'},
+  {name:'Utah',gid:'utah'},
+  {name:'Utah Valley',gid:'utva'},
+  {name:'UTRGV',gid:'utrgv'},
+  {name:'UTSA',gid:'txsa'},
+  {name:'Valparaiso',gid:'val'},
+  {name:'Vanderbilt',gid:'vand'},
+  {name:'VCU',gid:'vcu'},
+  {name:'Villanova',gid:'nova'},
+  {name:'Virginia',gid:'va'},
+  {name:'Virginia Tech',gid:'vtec'},
+  {name:'Wake Forest',gid:'wake'},
+  {name:'Washington',gid:'wash'},
+  {name:'Washington State',gid:'wast'},
+  {name:'West Virginia',gid:'wvir'},
+  {name:'Western Carolina',gid:'wcar'},
+  {name:'Western Kentucky',gid:'wky'},
+  {name:'Western Michigan',gid:'wmu'},
+  {name:'Wichita State',gid:'wich'},
+  {name:'William & Mary',gid:'wima'},
+  {name:'Winthrop',gid:'wint'},
+  {name:'Xavier',gid:'xavi'},
+];
+
+// ─── Parse score text ───
+// Examples:
+//   "Alabama 3, Rhode Island 0 - Pregame"
+//   "Alabama 3, Rhode Island 1 - T5th"
+//   "Alabama 3, Rhode Island 1 - B7th"
+//   "Crimson 6, Gray 5 - T8th"
+//   "Washington State 8, Alabama 4 - FINAL"
+//   "Alabama 8, Washington State 1 - FINAL"
+
+function parseScoreText(text) {
+  if (!text || text.trim() === '') return null;
+
+  // Match: "Team1 Score1, Team2 Score2 - Status"
+  const m = text.match(/^(.+?)\s+(\d+),\s+(.+?)\s+(\d+)\s*-\s*(.+)$/);
+  if (!m) return null;
+
+  const team1 = m[1].trim();
+  const score1 = parseInt(m[2]);
+  const team2 = m[3].trim();
+  const score2 = parseInt(m[4]);
+  const statusText = m[5].trim();
+
+  let status = 'pre';
+  let inning = null;
+  let half = null;
+
+  if (statusText === 'FINAL' || statusText.startsWith('FINAL')) {
+    status = 'final';
+  } else if (statusText === 'Pregame' || statusText === 'Pre-Game') {
+    status = 'pre';
+  } else {
+    // Parse inning: T5th, B7th, Top 5th, Bot 7th, etc.
+    const innMatch = statusText.match(/^(T|B|Top|Bot|Mid)\s*(\d+)/i);
+    if (innMatch) {
+      status = 'live';
+      const halfStr = innMatch[1].toUpperCase();
+      half = (halfStr === 'T' || halfStr === 'TOP') ? 'top' : (halfStr === 'MID' ? 'mid' : 'bottom');
+      inning = parseInt(innMatch[2]);
+    } else {
+      // Could be "End 5th" or just "5th"
+      const endMatch = statusText.match(/(?:End\s+)?(\d+)/i);
+      if (endMatch) {
+        status = 'live';
+        inning = parseInt(endMatch[1]);
+        half = 'mid'; // between innings
+      }
+    }
+  }
+
+  return { team1, score1, team2, score2, status, inning, half };
+}
+
+// ─── Scraper ───
 
 class StatBroadcastScraper {
   constructor() {
-    this.games = new Map(); // gameId -> game object
-    this.activeGids = new Set(); // GIDs currently returning live games
-    this.lastFullScan = 0;
-    this.scanInterval = 5 * 60 * 1000; // Full scan every 5 minutes
-    this.pollInterval = 10 * 1000; // Active game poll every 10 seconds
+    this.games = new Map();       // eventId -> parsed game
+    this.tokenCache = new Map();  // gid -> { hash, time, ts }
+    this.liveGids = new Set();    // GIDs with active live games
     this.running = false;
-    this.stats = { totalPolls: 0, errors: 0, lastPoll: null };
+    this.scanInterval = 3 * 60 * 1000;  // Full scan every 3 min
+    this.pollInterval = 15 * 1000;       // Poll live games every 15s
+    this.stats = { totalScans: 0, errors: 0, lastScan: null, lastPoll: null, tokensObtained: 0 };
   }
 
-  // Full scan: check all schools with verified GIDs
-  async fullScan() {
-    const teamsWithGid = TEAMS.filter(t => t.gid);
-    console.log(`[SB] Scanning ${teamsWithGid.length} schools for live games...`);
-    const startTime = Date.now();
-    this.activeGids.clear();
-    this.games.clear(); // Clear old games — only live games matter
-
-    for (let i = 0; i < teamsWithGid.length; i += 10) {
-      const batch = teamsWithGid.slice(i, i + 10);
-      const results = await Promise.allSettled(
-        batch.map(team => this.scrapeSchool(team.gid))
-      );
-
-      for (let j = 0; j < results.length; j++) {
-        if (results[j].status === 'fulfilled' && results[j].value.length > 0) {
-          this.activeGids.add(batch[j].gid);
-          for (const game of results[j].value) {
-            this.games.set(game.id, game);
-          }
-        }
-      }
-      await new Promise(r => setTimeout(r, 200));
+  // Step 1: Get hash+time tokens from a school's statmonitr page
+  async getTokens(gid) {
+    const cached = this.tokenCache.get(gid);
+    // Reuse tokens for 30 min
+    if (cached && (Date.now() - cached.ts) < 30 * 60 * 1000) {
+      return { hash: cached.hash, time: cached.time };
     }
 
-    this.lastFullScan = Date.now();
-    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-    console.log(`[SB] Scan complete in ${elapsed}s — ${this.games.size} live games from ${this.activeGids.size} schools`);
+    try {
+      const html = await fetchGet(`https://www.statbroadcast.com/events/statmonitr.php?gid=${gid}`, 10000);
+      const hashM = html.match(/sbCal\.hash\s*=\s*"([^"]+)"/);
+      const timeM = html.match(/sbCal\.time\s*=\s*"([^"]+)"/);
+      if (hashM && timeM) {
+        const tokens = { hash: hashM[1], time: timeM[1], ts: Date.now() };
+        this.tokenCache.set(gid, tokens);
+        this.stats.tokensObtained++;
+        return { hash: tokens.hash, time: tokens.time };
+      }
+    } catch (e) { /* failed */ }
+    return null;
   }
 
-  async scrapeSchool(gid) {
-    const url = `https://www.statbroadcast.com/events/statbroadcast.php?gid=${gid}`;
+  // Step 2: Fetch today's baseball games for a school
+  async fetchSchoolGames(gid) {
+    const tokens = await this.getTokens(gid);
+    if (!tokens) return [];
+
+    const now = new Date();
+    const month = now.getMonth() + 1;
+    const year = now.getFullYear();
+
     try {
-      const html = await fetch(url);
-      const games = parseGames(html, gid);
-      this.stats.totalPolls++;
-      this.stats.lastPoll = new Date().toISOString();
-      return games;
-    } catch (err) {
+      const url = `https://www.statbroadcast.com/events/_calendar.php?hash=${encodeURIComponent(tokens.hash)}&time=${tokens.time}`;
+      const postData = {
+        'o[gid]': gid,
+        'o[conf]': '',
+        'o[sport]': 'bsgame',
+        'o[gender]': 'M',
+        'o[live]': '1',
+        'o[month]': month,
+        'o[year]': year,
+        'o[members]': '',
+        'o[schools]': '',
+      };
+      const raw = await fetchPost(url, postData, 10000);
+      const json = JSON.parse(raw);
+      return json.data || [];
+    } catch (e) {
       this.stats.errors++;
       return [];
     }
   }
 
-  async pollActive() {
-    if (this.activeGids.size === 0) return;
+  // Step 3: Parse games into our standard format
+  parseGame(row, schoolName) {
+    const parsed = parseScoreText(row.score || row.name || '');
+    if (!parsed) return null;
+    if (parsed.status === 'pre') return null; // Only care about live/final
 
-    const gids = [...this.activeGids];
-    const results = await Promise.allSettled(
-      gids.map(gid => this.scrapeSchool(gid))
+    return {
+      id: `sb-${row.id}`,
+      source: 'statbroadcast',
+      sbEventId: row.id,
+      status: parsed.status,
+      inning: parsed.inning,
+      half: parsed.half,
+      // No BSO/runners from StatBroadcast
+      balls: null,
+      strikes: null,
+      outs: null,
+      runners: null,
+      pitcher: null,
+      hitter: null,
+      home: {
+        name: parsed.team2,  // In SB, format is "Away Score, Home Score"
+        score: parsed.score2,
+        hits: null, errors: null, lineScore: [],
+      },
+      away: {
+        name: parsed.team1,
+        score: parsed.score1,
+        hits: null, errors: null, lineScore: [],
+      },
+      location: row.location || '',
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
+  // Full scan of all 212 schools
+  async fullScan() {
+    console.log(`[StatBroadcast] Scanning ${SB_SCHOOLS.length} schools...`);
+    const start = Date.now();
+    this.games.clear();
+
+    for (let i = 0; i < SB_SCHOOLS.length; i += 5) {
+      const batch = SB_SCHOOLS.slice(i, i + 5);
+      await Promise.allSettled(
+        batch.map(async (school) => {
+          try {
+            const rows = await this.fetchSchoolGames(school.gid);
+            for (const row of rows) {
+              if (row.short && row.short !== 'bsgame') continue;
+              const game = this.parseGame(row, school.name);
+              if (game && (game.status === 'live' || game.status === 'final')) {
+                if (!this.games.has(game.id)) {
+                  this.games.set(game.id, game);
+                  // Track which GIDs have live games for fast polling
+                  if (game.status === 'live') {
+                    this.liveGids.add(school.gid);
+                  }
+                }
+              }
+            }
+          } catch (e) { /* skip school */ }
+        })
+      );
+      await new Promise(r => setTimeout(r, 500));
+    }
+
+    this.stats.totalScans++;
+    this.stats.lastScan = new Date().toISOString();
+    const elapsed = ((Date.now() - start) / 1000).toFixed(1);
+    const live = [...this.games.values()].filter(g => g.status === 'live').length;
+    console.log(`[StatBroadcast] Scan done ${elapsed}s — ${this.games.size} games (${live} live), ${this.liveGids.size} live GIDs, ${this.tokenCache.size} tokens`);
+  }
+
+  // Fast poll — only re-fetch schools that have live games
+  async pollLive() {
+    if (this.liveGids.size === 0) return;
+    const gids = [...this.liveGids];
+    await Promise.allSettled(
+      gids.map(async (gid) => {
+        try {
+          const rows = await this.fetchSchoolGames(gid);
+          let stillLive = false;
+          for (const row of rows) {
+            if (row.short && row.short !== 'bsgame') continue;
+            const game = this.parseGame(row, gid);
+            if (game) {
+              this.games.set(game.id, game);
+              if (game.status === 'live') stillLive = true;
+            }
+          }
+          if (!stillLive) this.liveGids.delete(gid);
+        } catch (e) { /* skip */ }
+      })
     );
-
-    // Rebuild live games from active schools
-    const newGames = new Map();
-    let liveCount = 0;
-
-    for (let i = 0; i < results.length; i++) {
-      if (results[i].status === 'fulfilled') {
-        const games = results[i].value;
-        for (const game of games) {
-          newGames.set(game.id, game);
-          liveCount++;
-        }
-        // If school returned no live games, remove from active set
-        if (games.length === 0) {
-          this.activeGids.delete(gids[i]);
-        }
-      }
-    }
-
-    // Replace game store with fresh live data
-    this.games = newGames;
-
-    if (liveCount > 0) {
-      console.log(`[SB] ${liveCount} live games from ${this.activeGids.size} schools`);
-    }
+    this.stats.lastPoll = new Date().toISOString();
   }
 
   getGames() { return [...this.games.values()]; }
-  getLiveGames() { return this.getGames(); } // All games are live
+  getLiveGames() { return [...this.games.values()].filter(g => g.status === 'live'); }
 
   start() {
     if (this.running) return;
     this.running = true;
-    console.log('[SB] StatBroadcast scraper starting (live games only)...');
-    this.fullScan().then(() => {
-      this._pollLoop();
-      this._scanLoop();
-    });
-  }
-
-  async _pollLoop() {
-    while (this.running) {
-      await this.pollActive();
-      await new Promise(r => setTimeout(r, this.pollInterval));
-    }
+    console.log(`[StatBroadcast] Starting (${SB_SCHOOLS.length} schools)`);
+    this.fullScan().then(() => { this._scanLoop(); this._pollLoop(); });
   }
 
   async _scanLoop() {
@@ -283,15 +509,25 @@ class StatBroadcastScraper {
     }
   }
 
+  async _pollLoop() {
+    while (this.running) {
+      await new Promise(r => setTimeout(r, this.pollInterval));
+      await this.pollLive();
+    }
+  }
+
   stop() { this.running = false; }
 
   getStats() {
     return {
       ...this.stats,
-      activeSchools: this.activeGids.size,
-      liveGames: this.games.size,
+      liveGames: this.getLiveGames().length,
+      liveGids: this.liveGids.size,
+      totalGames: this.games.size,
+      cachedTokens: this.tokenCache.size,
+      totalSchools: SB_SCHOOLS.length,
     };
   }
 }
 
-module.exports = { StatBroadcastScraper };
+module.exports = { StatBroadcastScraper, SB_SCHOOLS };

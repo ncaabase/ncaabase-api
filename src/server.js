@@ -1,12 +1,14 @@
-// NCAABase API Server v5
+// NCAABase API Server v6
 // Sources:
-//   1. PEARatings API — today's D1 schedule (teams, times, win prob, GQI) — 5min poll
-//   2. Sidearm Live Stats — real-time scores, BSO, runners, pitcher/batter — 12s poll
-//   3. Massey Ratings — static reference (308 teams)
+//   1. PEARatings API — D1 schedule (teams, times, win prob, GQI) — 5min poll
+//   2. Sidearm Live Stats — 95 schools, real-time BSO/runners/pitcher — 8s poll
+//   3. StatBroadcast — 212 schools, scores + inning — 3min scan
+//   All merge into GameStore for unified API
 
 const express = require('express');
 const cors = require('cors');
 const { SidearmLivePoller } = require('./sidearm-live');
+const { StatBroadcastScraper } = require('./statbroadcast-scraper');
 const { PearPoller } = require('./pear-poller');
 const { GameStore } = require('./game-store');
 const { TEAMS } = require('./teams');
@@ -27,9 +29,10 @@ app.use(cors({
 
 const gameStore = new GameStore();
 const sidearmLive = new SidearmLivePoller();
+const statBroadcast = new StatBroadcastScraper();
 const pearPoller = new PearPoller();
 
-// Sync loop: merge PEAR schedule + Sidearm live scores
+// Sync loop: merge PEAR schedule + live scores from both sources
 async function syncLoop() {
   while (true) {
     try {
@@ -37,8 +40,11 @@ async function syncLoop() {
       if (pearGames.length > 0) {
         gameStore.setSchedule(pearGames);
       }
-      const liveGames = sidearmLive.getGames();
-      gameStore.setLive(liveGames);
+      // Merge both live sources — Sidearm has priority (richer data)
+      const sidearmGames = sidearmLive.getGames();
+      const sbGames = statBroadcast.getGames();
+      const allLive = [...sidearmGames, ...sbGames];
+      gameStore.setLive(allLive);
     } catch (err) {
       console.error('[Sync] Error:', err.message);
     }
@@ -93,6 +99,7 @@ app.get('/api/status', (req, res) => {
     teams: TEAMS.length,
     games: gameStore.getStats(),
     sidearmLive: sidearmLive.getStats(),
+    statBroadcast: statBroadcast.getStats(),
     pear: {
       games: pearPoller.getGames().length,
       lastFetch: pearPoller.lastFetch,
@@ -100,7 +107,6 @@ app.get('/api/status', (req, res) => {
   });
 });
 
-// Debug: show raw sidearm live data
 app.get('/api/debug/sidearm', (req, res) => {
   const games = sidearmLive.getGames();
   res.json({
@@ -108,44 +114,42 @@ app.get('/api/debug/sidearm', (req, res) => {
     activeAbbrevs: [...sidearmLive.activeAbbrevs || []],
     cachedAbbrevs: sidearmLive.getStats().cachedList || [],
     games: games.map(g => ({
-      id: g.id,
-      status: g.status,
-      home: g.home?.name,
-      away: g.away?.name,
-      homeScore: g.home?.score,
-      awayScore: g.away?.score,
-      inning: g.inning,
-      half: g.half,
-      balls: g.balls,
-      strikes: g.strikes,
-      outs: g.outs,
+      id: g.id, status: g.status,
+      home: g.home?.name, away: g.away?.name,
+      homeScore: g.home?.score, awayScore: g.away?.score,
+      inning: g.inning, half: g.half,
+      balls: g.balls, strikes: g.strikes, outs: g.outs,
       runners: g.runners,
-      pitcher: g.pitcher?.name,
-      hitter: g.hitter?.name,
+      pitcher: g.pitcher?.name, hitter: g.hitter?.name,
     })),
   });
 });
 
-// Debug: show a single live game with all fields
+app.get('/api/debug/statbroadcast', (req, res) => {
+  const games = statBroadcast.getGames();
+  res.json({
+    count: games.length,
+    stats: statBroadcast.getStats(),
+    games: games.map(g => ({
+      id: g.id, status: g.status, sbEventId: g.sbEventId,
+      home: g.home?.name, away: g.away?.name,
+      homeScore: g.home?.score, awayScore: g.away?.score,
+      inning: g.inning, half: g.half,
+    })),
+  });
+});
+
 app.get('/api/debug/live', (req, res) => {
   const liveGames = gameStore.getLiveGames();
   res.json({
     count: liveGames.length,
     games: liveGames.map(g => ({
-      id: g.id,
-      source: g.source,
-      status: g.status,
+      id: g.id, source: g.source, status: g.status,
       home: { name: g.home?.name, score: g.home?.score },
       away: { name: g.away?.name, score: g.away?.score },
-      inning: g.inning,
-      half: g.half,
-      balls: g.balls,
-      strikes: g.strikes,
-      outs: g.outs,
-      runners: g.runners,
-      pitcher: g.pitcher,
-      hitter: g.hitter,
-      lineScore: { home: g.home?.lineScore, away: g.away?.lineScore },
+      inning: g.inning, half: g.half,
+      balls: g.balls, strikes: g.strikes, outs: g.outs,
+      runners: g.runners, pitcher: g.pitcher, hitter: g.hitter,
     })),
   });
 });
@@ -153,25 +157,27 @@ app.get('/api/debug/live', (req, res) => {
 app.get('/', (req, res) => {
   res.json({
     name: 'NCAABase API',
-    version: '5.1',
-    sources: ['PEARatings (schedule, 5min)', 'Sidearm Live Stats (scores/BSO/runners, 8s)'],
-    endpoints: ['/api/scores', '/api/scores/:date', '/api/scores/live', '/api/scores/conference/:conf', '/api/teams', '/api/status', '/api/debug/sidearm', '/api/debug/live'],
+    version: '6.0',
+    sources: ['PEARatings (schedule)', 'Sidearm Live Stats (95 schools, BSO/runners)', 'StatBroadcast (212 schools, scores)'],
+    endpoints: ['/api/scores', '/api/scores/:date', '/api/scores/live', '/api/scores/conference/:conf', '/api/teams', '/api/status'],
   });
 });
 
 // ─── Start ───
 
 app.listen(PORT, () => {
-  console.log(`\n=== NCAABase API v5.0 ===`);
+  console.log(`\n=== NCAABase API v6.0 ===`);
   console.log(`Port: ${PORT}`);
   console.log(`Teams: ${TEAMS.length}`);
-  console.log(`PEAR: schedule (5min poll)`);
-  console.log(`Sidearm: live stats (12s poll)`);
+  console.log(`PEAR: schedule (5min)`);
+  console.log(`Sidearm: 95 schools (8s live poll)`);
+  console.log(`StatBroadcast: 212 schools (3min scan)`);
   console.log(`========================\n`);
   pearPoller.start();
   sidearmLive.start();
+  statBroadcast.start();
   syncLoop();
 });
 
-process.on('SIGTERM', () => { sidearmLive.stop(); pearPoller.stop(); process.exit(0); });
-process.on('SIGINT', () => { sidearmLive.stop(); pearPoller.stop(); process.exit(0); });
+process.on('SIGTERM', () => { sidearmLive.stop(); statBroadcast.stop(); pearPoller.stop(); process.exit(0); });
+process.on('SIGINT', () => { sidearmLive.stop(); statBroadcast.stop(); pearPoller.stop(); process.exit(0); });
