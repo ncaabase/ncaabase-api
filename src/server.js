@@ -100,12 +100,62 @@ app.get('/api/status', (req, res) => {
   });
 });
 
+// Debug: show raw sidearm live data
+app.get('/api/debug/sidearm', (req, res) => {
+  const games = sidearmLive.getGames();
+  res.json({
+    count: games.length,
+    activeAbbrevs: [...sidearmLive.activeAbbrevs || []],
+    cachedAbbrevs: sidearmLive.getStats().cachedList || [],
+    games: games.map(g => ({
+      id: g.id,
+      status: g.status,
+      home: g.home?.name,
+      away: g.away?.name,
+      homeScore: g.home?.score,
+      awayScore: g.away?.score,
+      inning: g.inning,
+      half: g.half,
+      balls: g.balls,
+      strikes: g.strikes,
+      outs: g.outs,
+      runners: g.runners,
+      pitcher: g.pitcher?.name,
+      hitter: g.hitter?.name,
+    })),
+  });
+});
+
+// Debug: show a single live game with all fields
+app.get('/api/debug/live', (req, res) => {
+  const liveGames = gameStore.getLiveGames();
+  res.json({
+    count: liveGames.length,
+    games: liveGames.map(g => ({
+      id: g.id,
+      source: g.source,
+      status: g.status,
+      home: { name: g.home?.name, score: g.home?.score },
+      away: { name: g.away?.name, score: g.away?.score },
+      inning: g.inning,
+      half: g.half,
+      balls: g.balls,
+      strikes: g.strikes,
+      outs: g.outs,
+      runners: g.runners,
+      pitcher: g.pitcher,
+      hitter: g.hitter,
+      lineScore: { home: g.home?.lineScore, away: g.away?.lineScore },
+    })),
+  });
+});
+
 app.get('/', (req, res) => {
   res.json({
     name: 'NCAABase API',
-    version: '5.0',
-    sources: ['PEARatings (schedule, 5min)', 'Sidearm Live Stats (scores/BSO/runners, 12s)'],
-    endpoints: ['/api/scores', '/api/scores/:date', '/api/scores/live', '/api/scores/conference/:conf', '/api/teams', '/api/status'],
+    version: '5.1',
+    sources: ['PEARatings (schedule, 5min)', 'Sidearm Live Stats (scores/BSO/runners, 8s)'],
+    endpoints: ['/api/scores', '/api/scores/:date', '/api/scores/live', '/api/scores/conference/:conf', '/api/teams', '/api/status', '/api/debug/sidearm', '/api/debug/live'],
   });
 });
 
