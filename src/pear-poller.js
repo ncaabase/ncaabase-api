@@ -80,6 +80,7 @@ function parseGame(g) {
     status,
     home: {
       name: homeTeam.name,
+      pearName: g.home_team || homeTeam.name,
       abbr: homeTeam.abbr,
       conf: homeTeam.conf || g.home_conference || '',
       score: homeScore,
@@ -91,6 +92,7 @@ function parseGame(g) {
     },
     away: {
       name: awayTeam.name,
+      pearName: g.away_team || awayTeam.name,
       abbr: awayTeam.abbr,
       conf: awayTeam.conf || g.away_conference || '',
       score: awayScore,
