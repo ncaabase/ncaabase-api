@@ -137,7 +137,7 @@ function parseSidearmGame(json) {
 
   const home = g.HomeTeam || {};
   const away = g.VisitingTeam || {};
-  const sit = json.Situation || {};
+  const sit = g.Situation || {};
 
   let status = 'pre';
   if (g.IsComplete) status = 'final';
