@@ -1,16 +1,15 @@
 // Game Store — Central game state manager
 // PEAR provides: today's schedule (all D1 games, teams, times, win prob, GQI)
-// StatBroadcast provides: live scores + inning for in-progress games
-// Logic: Start with PEAR schedule, overlay SB live data by matching teams
+// Sidearm Live provides: real-time scores, BSO, runners, pitcher, batter, line scores
+// Logic: Start with PEAR schedule, overlay Sidearm live data by matching teams
 
 class GameStore {
   constructor() {
-    this.scheduleGames = new Map(); // PEAR schedule: id -> game
-    this.liveGames = new Map();     // SB live: id -> game
-    this.merged = [];               // Final merged + sorted array
+    this.scheduleGames = new Map();
+    this.liveGames = new Map();
+    this.merged = [];
   }
 
-  // Set today's schedule from PEAR
   setSchedule(pearGames) {
     this.scheduleGames.clear();
     for (const g of pearGames) {
@@ -20,85 +19,85 @@ class GameStore {
     console.log(`[Store] Schedule: ${pearGames.length} games`);
   }
 
-  // Update live scores from StatBroadcast
-  setLive(sbGames) {
+  setLive(liveGames) {
     this.liveGames.clear();
-    for (const g of sbGames) {
-      this.liveGames.set(g.id, g);
+    for (const g of liveGames) {
+      this.liveGames.set(g.id || g.sourceAbbrev, g);
     }
     this._rebuild();
   }
 
-  // Merge schedule + live data
   _rebuild() {
     const result = new Map();
-
-    // Start with all schedule games
     for (const [id, g] of this.scheduleGames) {
       result.set(id, { ...g });
     }
-
-    // Overlay live games — match by team names
-    for (const [sbId, live] of this.liveGames) {
+    for (const [liveId, live] of this.liveGames) {
       const scheduleMatch = this._findByTeams(result, live);
       if (scheduleMatch) {
-        // Found matching schedule game — upgrade it with live data
         const sched = result.get(scheduleMatch);
         result.set(scheduleMatch, {
           ...sched,
-          status: 'live',
+          status: live.status || 'live',
           inning: live.inning,
           half: live.half,
+          balls: live.balls || 0,
+          strikes: live.strikes || 0,
+          outs: live.outs || 0,
+          runners: live.runners || { first: false, second: false, third: false },
+          pitcher: live.pitcher || null,
+          hitter: live.hitter || null,
           home: {
             ...sched.home,
-            score: live.home.score,
-            hits: live.home.hits,
-            errors: live.home.errors,
-            lineScore: live.home.lineScore || [],
+            score: live.home.score != null ? live.home.score : sched.home.score,
+            hits: live.home.hits || sched.home.hits,
+            errors: live.home.errors || sched.home.errors,
+            lineScore: (live.home.lineScore && live.home.lineScore.length > 0) ? live.home.lineScore : sched.home.lineScore,
           },
           away: {
             ...sched.away,
-            score: live.away.score,
-            hits: live.away.hits,
-            errors: live.away.errors,
-            lineScore: live.away.lineScore || [],
+            score: live.away.score != null ? live.away.score : sched.away.score,
+            hits: live.away.hits || sched.away.hits,
+            errors: live.away.errors || sched.away.errors,
+            lineScore: (live.away.lineScore && live.away.lineScore.length > 0) ? live.away.lineScore : sched.away.lineScore,
           },
-          runners: live.runners,
-          eventId: live.eventId,
-          source: 'statbroadcast+pear',
-          updatedAt: live.updatedAt,
+          wp: live.wp || sched.wp || null,
+          lp: live.lp || sched.lp || null,
+          sv: live.sv || sched.sv || null,
+          source: 'sidearm-live+pear',
+          updatedAt: live.updatedAt || new Date().toISOString(),
         });
       } else {
-        // Live game not in schedule — add it directly
-        result.set(sbId, live);
+        result.set(liveId, {
+          id: liveId, ...live,
+          balls: live.balls || 0,
+          strikes: live.strikes || 0,
+          outs: live.outs || 0,
+          runners: live.runners || { first: false, second: false, third: false },
+        });
       }
     }
-
-    // Sort: live (by inning desc) → upcoming (by time) → final
     this.merged = [...result.values()].sort((a, b) => {
-      const order = { live: 0, pre: 1, final: 2 };
+      const order = { live: 0, pre: 1, final: 2, cancelled: 3 };
       const oa = order[a.status] ?? 1;
       const ob = order[b.status] ?? 1;
       if (oa !== ob) return oa - ob;
       if (a.status === 'live') return (b.inning || 0) - (a.inning || 0);
-      // For upcoming, sort by GQI (highest quality first)
-      if (a.status === 'pre') return (b.gqi || 0) - (a.gqi || 0);
+      if (a.status === 'pre') {
+        return parseTimeToMin(a.time || a.startTime) - parseTimeToMin(b.time || b.startTime);
+      }
       return 0;
     });
   }
 
-  // Find a schedule game matching a live game by team names
   _findByTeams(gameMap, liveGame) {
     const lh = (liveGame.home?.name || '').toLowerCase();
     const la = (liveGame.away?.name || '').toLowerCase();
     if (!lh || !la) return null;
-
     for (const [id, g] of gameMap) {
       const gh = (g.home?.name || '').toLowerCase();
       const ga = (g.away?.name || '').toLowerCase();
-      // Exact match
       if ((gh === lh && ga === la) || (gh === la && ga === lh)) return id;
-      // Partial match (handles "Arkansas" vs "Arkansas Razorbacks" etc)
       if (gh && lh && ga && la) {
         if ((gh.includes(lh) || lh.includes(gh)) && (ga.includes(la) || la.includes(ga))) return id;
         if ((gh.includes(la) || la.includes(gh)) && (ga.includes(lh) || lh.includes(ga))) return id;
@@ -108,26 +107,36 @@ class GameStore {
   }
 
   getGames() { return this.merged; }
-
   getLiveGames() { return this.merged.filter(g => g.status === 'live'); }
-
   getGamesByConf(conf) {
     return this.merged.filter(g =>
       (g.home?.conf || '') === conf || (g.away?.conf || '') === conf ||
       (g.home?.conf || '').includes(conf) || (g.away?.conf || '').includes(conf)
     );
   }
-
   getStats() {
     return {
       total: this.merged.length,
       live: this.merged.filter(g => g.status === 'live').length,
       final: this.merged.filter(g => g.status === 'final').length,
       pre: this.merged.filter(g => g.status === 'pre').length,
+      cancelled: this.merged.filter(g => g.status === 'cancelled').length,
       schedule: this.scheduleGames.size,
       liveOverlays: this.liveGames.size,
     };
   }
+}
+
+function parseTimeToMin(t) {
+  if (!t) return 9999;
+  const m = (t || '').match(/(\d+):(\d+)\s*(AM|PM)?/i);
+  if (!m) return 9999;
+  let h = parseInt(m[1]);
+  const min = parseInt(m[2]);
+  const ap = (m[3] || '').toUpperCase();
+  if (ap === 'PM' && h < 12) h += 12;
+  if (ap === 'AM' && h === 12) h = 0;
+  return h * 60 + min;
 }
 
 module.exports = { GameStore };
