@@ -111,6 +111,41 @@ app.get('/api/team/:name/schedule', async (req, res) => {
   }
 });
 
+// Team schedule by slug
+app.get('/api/team-by-slug/:slug', async (req, res) => {
+  const slug = req.params.slug.toLowerCase();
+  // Find team name from today's games by matching slug
+  const todayGames = gameStore.getGames();
+  let teamName = null;
+  for (const g of todayGames) {
+    if (g.home?.slug === slug) { teamName = g.home.name; break; }
+    if (g.away?.slug === slug) { teamName = g.away.name; break; }
+  }
+  // Also check TEAMS list
+  if (!teamName) {
+    const slugify = (n) => (n||'').toLowerCase().replace(/[()]/g,'').replace(/[&]/g,'and').replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'');
+    const team = TEAMS.find(t => slugify(t.name) === slug);
+    if (team) teamName = team.name;
+  }
+  if (!teamName) {
+    return res.status(404).json({ error: 'Team not found' });
+  }
+  try {
+    const games = await pearPoller.fetchTeamSchedule(teamName);
+    const team = TEAMS.find(t =>
+      t.name.toLowerCase() === teamName.toLowerCase()
+    );
+    res.json({
+      team: team || { name: teamName },
+      slug,
+      count: games.length,
+      games,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/status', (req, res) => {
   res.json({
     status: 'ok',
