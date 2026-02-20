@@ -26,7 +26,6 @@ function fetch(url, timeout = 15000) {
 function parseGame(g) {
   const homeTeam = findTeam(g.home_team) || { name: g.home_team, abbr: g.home_team.substring(0,4).toUpperCase(), conf: g.home_conference || '' };
   const awayTeam = findTeam(g.away_team) || { name: g.away_team, abbr: g.away_team.substring(0,4).toUpperCase(), conf: g.away_conference || '' };
-
   // Determine status from score field
   let status = 'pre';
   let homeScore = null;
@@ -79,8 +78,8 @@ function parseGame(g) {
     source: 'pear',
     status,
     home: {
-      name: homeTeam.name,
-      pearName: g.home_team || homeTeam.name,
+      name: g.home_team || homeTeam.name,
+      canonical: homeTeam.name,
       abbr: homeTeam.abbr,
       conf: homeTeam.conf || g.home_conference || '',
       score: homeScore,
@@ -91,8 +90,8 @@ function parseGame(g) {
       lineScore: [],
     },
     away: {
-      name: awayTeam.name,
-      pearName: g.away_team || awayTeam.name,
+      name: g.away_team || awayTeam.name,
+      canonical: awayTeam.name,
       abbr: awayTeam.abbr,
       conf: awayTeam.conf || g.away_conference || '',
       score: awayScore,

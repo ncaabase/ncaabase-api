@@ -95,13 +95,18 @@ class GameStore {
     const la = (liveGame.away?.name || '').toLowerCase();
     if (!lh || !la) return null;
     for (const [id, g] of gameMap) {
-      const gh = (g.home?.name || '').toLowerCase();
-      const ga = (g.away?.name || '').toLowerCase();
-      if ((gh === lh && ga === la) || (gh === la && ga === lh)) return id;
-      if (gh && lh && ga && la) {
-        if ((gh.includes(lh) || lh.includes(gh)) && (ga.includes(la) || la.includes(ga))) return id;
-        if ((gh.includes(la) || la.includes(gh)) && (ga.includes(lh) || lh.includes(ga))) return id;
-      }
+      // Check display name AND canonical name
+      const names_h = [g.home?.name, g.home?.canonical].filter(Boolean).map(n => n.toLowerCase());
+      const names_a = [g.away?.name, g.away?.canonical].filter(Boolean).map(n => n.toLowerCase());
+
+      const homeMatch = names_h.some(n => n === lh || n.includes(lh) || lh.includes(n));
+      const awayMatch = names_a.some(n => n === la || n.includes(la) || la.includes(n));
+      if (homeMatch && awayMatch) return id;
+
+      // Check swapped (home/away might be reversed)
+      const homeMatchR = names_h.some(n => n === la || n.includes(la) || la.includes(n));
+      const awayMatchR = names_a.some(n => n === lh || n.includes(lh) || lh.includes(n));
+      if (homeMatchR && awayMatchR) return id;
     }
     return null;
   }
