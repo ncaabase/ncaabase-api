@@ -1,9 +1,6 @@
-// Sidearm Live Stats Poller
-// Polls sidearmstats.com/{abbrev}/baseball/game.json?detail=full for live game data
+// Sidearm Live Stats Poller v2
+// Discovers ClientAbbrev via multiple methods, then polls game.json for live data
 // Returns: scores, inning, half, BSO, runners, pitcher, batter, line scores
-//
-// Auto-discovers ClientAbbrev by fetching {hostname}/api/livestats/baseball
-// Then polls sidearmstats.com/{abbrev}/baseball/game.json?detail=full every 12s
 
 const https = require('https');
 const http = require('http');
@@ -15,7 +12,7 @@ function fetch(url, timeout = 8000) {
       timeout,
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Accept': 'application/json, text/plain, */*',
+        'Accept': 'application/json, text/html, */*',
       }
     }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
@@ -32,7 +29,6 @@ function fetch(url, timeout = 8000) {
 }
 
 // ─── 95 Sidearm Schools ───
-
 const SIDEARM_SCHOOLS = [
   {name:'Akron',host:'gozips.com',abbrev:null},
   {name:'Alabama A&M',host:'aamusports.com',abbrev:null},
@@ -131,16 +127,9 @@ const SIDEARM_SCHOOLS = [
   {name:'Youngstown State',host:'ysusports.com',abbrev:null},
 ];
 
-const BY_HOST = {};
-const BY_NAME = {};
-for (const s of SIDEARM_SCHOOLS) {
-  BY_HOST[s.host] = s;
-  BY_NAME[s.name.toLowerCase()] = s;
-}
-
 // ─── Parse game.json ───
 
-function parseSidearmGame(json, school) {
+function parseSidearmGame(json) {
   const g = json.Game;
   if (!g) return null;
   if (g.Type !== 'BaseballSoftballGame') return null;
@@ -185,7 +174,7 @@ function parseSidearmGame(json, school) {
   }
 
   const inning = sit.Inning ? Math.floor(sit.Inning) : (g.Period || 1);
-  const abbrev = g.ClientAbbrev || (school ? school.abbrev : '') || '';
+  const abbrev = g.ClientAbbrev || '';
 
   return {
     id: `sidearm-${abbrev}`,
@@ -225,22 +214,49 @@ class SidearmLivePoller {
   constructor() {
     this.games = new Map();
     this.activeAbbrevs = new Set();
-    this.abbrevCache = new Map();
+    this.abbrevCache = new Map();     // hostname -> abbrev
     this.running = false;
-    this.pollInterval = 12 * 1000;
-    this.discoveryInterval = 3 * 60 * 1000;
+    this.pollInterval = 8 * 1000;     // 8 seconds for active live games
+    this.discoveryInterval = 2 * 60 * 1000;  // 2 min discovery scan
     this.stats = { totalPolls: 0, errors: 0, lastPoll: null, lastDiscovery: null };
 
-    // Pre-fill known abbrevs
     for (const s of SIDEARM_SCHOOLS) {
       if (s.abbrev) this.abbrevCache.set(s.host, s.abbrev);
     }
   }
 
-  // Discover abbrev by hitting school's /api/livestats/baseball
-  async discoverAbbrev(school) {
+  // Discovery method 1: fetch the sidearm summary HTML page and extract abbrev from JS
+  async discoverFromPage(school) {
     if (this.abbrevCache.has(school.host)) return this.abbrevCache.get(school.host);
+    try {
+      // The sidearm summary page HTML contains a reference to sidearmstats.com/{abbrev}
+      const url = `https://${school.host}/sidearmstats/baseball/summary`;
+      const html = await fetch(url, 8000);
+      // Look for sidearmstats.com/{abbrev}/ pattern in the HTML/JS
+      const m = html.match(/sidearmstats\.com\/([a-zA-Z0-9_-]+)\/baseball/);
+      if (m) {
+        const abbrev = m[1];
+        this.abbrevCache.set(school.host, abbrev);
+        school.abbrev = abbrev;
+        console.log(`[SidearmLive] Discovered from page: ${school.name} -> ${abbrev}`);
+        return abbrev;
+      }
+      // Also try: ClientAbbrev in embedded JSON
+      const m2 = html.match(/"ClientAbbrev"\s*:\s*"([^"]+)"/);
+      if (m2) {
+        const abbrev = m2[1];
+        this.abbrevCache.set(school.host, abbrev);
+        school.abbrev = abbrev;
+        console.log(`[SidearmLive] Discovered from embedded JSON: ${school.name} -> ${abbrev}`);
+        return abbrev;
+      }
+    } catch (e) { /* page load failed */ }
+    return null;
+  }
 
+  // Discovery method 2: hit their /api/livestats/baseball (only works during active game)
+  async discoverFromAPI(school) {
+    if (this.abbrevCache.has(school.host)) return this.abbrevCache.get(school.host);
     try {
       const raw = await fetch(`https://${school.host}/api/livestats/baseball`, 6000);
       const json = JSON.parse(raw);
@@ -248,25 +264,22 @@ class SidearmLivePoller {
         const abbrev = json.Game.ClientAbbrev;
         this.abbrevCache.set(school.host, abbrev);
         school.abbrev = abbrev;
-        console.log(`[SidearmLive] Discovered: ${school.name} -> ${abbrev}`);
+        console.log(`[SidearmLive] Discovered from API: ${school.name} -> ${abbrev}`);
         return abbrev;
       }
-    } catch (e) { /* no active game or endpoint unavailable */ }
+    } catch (e) { /* no game or endpoint failed */ }
+    return null;
+  }
 
-    // Try sidearmstats.com directly — the hostname in the game.json Logo URL tells us
-    // Try the hostname-based sidearmstats fetch
-    try {
-      const raw = await fetch(`https://sidearmstats.com/${school.host.replace(/\.com$|\.edu$/,'')}/baseball/game.json`, 5000);
-      const json = JSON.parse(raw);
-      if (json.Game && json.Game.ClientAbbrev) {
-        const abbrev = json.Game.ClientAbbrev;
-        this.abbrevCache.set(school.host, abbrev);
-        school.abbrev = abbrev;
-        console.log(`[SidearmLive] Guessed: ${school.name} -> ${abbrev}`);
-        return abbrev;
-      }
-    } catch (e) { /* not found */ }
-
+  // Try all discovery methods
+  async discoverAbbrev(school) {
+    if (this.abbrevCache.has(school.host)) return this.abbrevCache.get(school.host);
+    // Method 1: Page scrape (always works, even without active game)
+    let abbrev = await this.discoverFromPage(school);
+    if (abbrev) return abbrev;
+    // Method 2: API (works during active game)
+    abbrev = await this.discoverFromAPI(school);
+    if (abbrev) return abbrev;
     return null;
   }
 
@@ -275,7 +288,7 @@ class SidearmLivePoller {
     try {
       const raw = await fetch(url, 6000);
       const json = JSON.parse(raw);
-      const game = parseSidearmGame(json, null);
+      const game = parseSidearmGame(json);
       this.stats.totalPolls++;
       this.stats.lastPoll = new Date().toISOString();
 
@@ -298,12 +311,11 @@ class SidearmLivePoller {
   }
 
   async fullScan() {
-    console.log(`[SidearmLive] Scanning ${SIDEARM_SCHOOLS.length} schools...`);
+    console.log(`[SidearmLive] Scanning ${SIDEARM_SCHOOLS.length} schools (${this.abbrevCache.size} cached)...`);
     const start = Date.now();
-    let discovered = 0;
 
-    for (let i = 0; i < SIDEARM_SCHOOLS.length; i += 10) {
-      const batch = SIDEARM_SCHOOLS.slice(i, i + 10);
+    for (let i = 0; i < SIDEARM_SCHOOLS.length; i += 8) {
+      const batch = SIDEARM_SCHOOLS.slice(i, i + 8);
       await Promise.allSettled(
         batch.map(async (school) => {
           let abbrev = school.abbrev || this.abbrevCache.get(school.host);
@@ -313,21 +325,20 @@ class SidearmLivePoller {
           try {
             const raw = await fetch(`https://sidearmstats.com/${abbrev}/baseball/game.json?detail=full`, 6000);
             const json = JSON.parse(raw);
-            const game = parseSidearmGame(json, school);
+            const game = parseSidearmGame(json);
             if (game && game.status === 'live') {
               this.activeAbbrevs.add(abbrev);
               this.games.set(abbrev, game);
-              discovered++;
             }
-          } catch (e) { /* no game */ }
+          } catch (e) { /* no active game */ }
         })
       );
-      await new Promise(r => setTimeout(r, 300));
+      await new Promise(r => setTimeout(r, 250));
     }
 
     this.stats.lastDiscovery = new Date().toISOString();
     const elapsed = ((Date.now() - start) / 1000).toFixed(1);
-    console.log(`[SidearmLive] Scan done in ${elapsed}s — ${this.games.size} live, ${this.abbrevCache.size} abbrevs cached`);
+    console.log(`[SidearmLive] Scan done ${elapsed}s — ${this.games.size} live, ${this.activeAbbrevs.size} active, ${this.abbrevCache.size} abbrevs cached`);
   }
 
   async pollActive() {
@@ -335,7 +346,7 @@ class SidearmLivePoller {
     const abbrevs = [...this.activeAbbrevs];
     await Promise.allSettled(abbrevs.map(a => this.pollSchool(a)));
     const live = [...this.games.values()].filter(g => g.status === 'live').length;
-    if (live > 0) console.log(`[SidearmLive] Poll: ${live} live games`);
+    if (live > 0) console.log(`[SidearmLive] Poll: ${live} live`);
   }
 
   getGames() { return [...this.games.values()]; }
@@ -344,7 +355,7 @@ class SidearmLivePoller {
   start() {
     if (this.running) return;
     this.running = true;
-    console.log(`[SidearmLive] Starting (${SIDEARM_SCHOOLS.length} schools, ${this.abbrevCache.size} known abbrevs)`);
+    console.log(`[SidearmLive] Starting (${SIDEARM_SCHOOLS.length} schools, ${this.abbrevCache.size} known)`);
     this.fullScan().then(() => { this._pollLoop(); this._scanLoop(); });
   }
 
@@ -371,6 +382,7 @@ class SidearmLivePoller {
       liveGames: this.getLiveGames().length,
       trackedGames: this.games.size,
       cachedAbbrevs: this.abbrevCache.size,
+      cachedList: [...this.abbrevCache.entries()].map(([h,a]) => `${h}=${a}`),
       totalSchools: SIDEARM_SCHOOLS.length,
     };
   }
